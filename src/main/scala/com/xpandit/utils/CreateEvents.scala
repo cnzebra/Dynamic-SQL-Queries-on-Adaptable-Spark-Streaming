@@ -12,13 +12,13 @@ object CreateEvents {
 
     val sb = new StringBuilder()
 
+
     for(i <- 0 until NumEventsPerPatient){
       generateEvent(sb)
       println("Event " + (i+1) + " for all racks generated")
     }
 
     println("[Generated] " + NumEventsPerPatient + " events x " + NumPatients + " racks = " + NumEventsPerPatient * NumPatients)
-
   }
 
 
@@ -39,3 +39,4 @@ object CreateEvents {
     sb.clear()
   }
 }
+

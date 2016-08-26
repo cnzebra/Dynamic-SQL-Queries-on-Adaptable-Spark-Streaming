@@ -1,15 +1,18 @@
 package com.xpandit.spark
 
 import _root_.kafka.serializer.StringDecoder
+
 import org.apache.log4j.Logger
 import org.apache.spark._
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.kafka._
+
 import org.josql.Query
 
 import scala.collection.JavaConversions._
 import scala.io.Source
+
 
 object SparkStatefulStreaming {
 
@@ -31,12 +34,12 @@ object SparkStatefulStreaming {
 
 
     val kafkaParams: Map[String, String] = Map("metadata.broker.list" -> "localhost:9092, localhost:9093, localhost:9094, localhost:9095",
-      "auto.offset.reset" -> "smallest")
+                                                                                                            "auto.offset.reset" -> "smallest")
+
 
     val kafkaStream = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, scala.collection.immutable.Set("events"))
 
     val events = kafkaStream.map((tuple) => createEvent(tuple._2))
-
 
     val updateFunc = (newValues: Seq[MedicalConsultationWaitingPacientEvent], state: Option[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]) => {
 
@@ -90,8 +93,10 @@ object SparkStatefulStreaming {
 
     updatedStream.foreachRDD((rdd) => {
 
+
       val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
       import sqlContext.implicits._
+
 
       val eventsRDD = rdd.flatMap { case (key, value) =>
         value.toStream.map(event => new MedicalConsultationWaitingPacientEventCase(event.healthServiceNumber, event.name, event.age, event.receptionUrgency, event.requestTime))
