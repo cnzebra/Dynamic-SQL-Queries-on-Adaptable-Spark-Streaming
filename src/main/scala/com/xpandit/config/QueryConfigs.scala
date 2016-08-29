@@ -9,14 +9,14 @@ import java.util.Properties
 class QueryConfigs extends Serializable {
 
   val configPath = "src/main/resources/streaming-query.conf"
-  var previousConfig: Properties = null
+  var lastSuccessfulConfig: Properties = null
   var config : Properties = null
 
+  def hasSuccessfulConfig() = lastSuccessfulConfig != null
 
+  def getFilteringWhereClause(lastSuccConfig: Boolean): String = (if (lastSuccConfig) lastSuccessfulConfig else config).getProperty("filtering_where_clause")
 
-  def getFilteringWhereClause(prevConf: Boolean): String = (if (prevConf) previousConfig else config).getProperty("filtering_where_clause")
-
-  def getQuery(prevConf: Boolean): String = (if (prevConf) previousConfig else config).getProperty("query")
+  def getQuery(lastSuccConfig: Boolean): String = (if (lastSuccConfig) lastSuccessfulConfig else config).getProperty("query")
 
   def updateConfigs() = {
 
@@ -26,6 +26,6 @@ class QueryConfigs extends Serializable {
     config = props
   }
 
-  def setPreviousConfig() = { previousConfig = config }
+  def saveConfigAsLastSuccessful() = { lastSuccessfulConfig = config }
 
 }

@@ -19,6 +19,8 @@ object SparkStatefulStreaming {
   val CheckpointPath = "/tmp/spark/checkpoint"
 
   val queryConfigs = new QueryConfigs()
+  var failedQueryAccum : Accumulator[Long] = null
+
 
   def main(args: Array[String]): Unit = {
 
@@ -32,15 +34,18 @@ object SparkStatefulStreaming {
     val ssc = new StreamingContext(conf, Seconds(5))
     ssc.checkpoint("/tmp/spark/checkpoint")
 
+    failedQueryAccum = ssc.sparkContext.accumulator(0L, "Failed filtering query")
+
+    var isBatchEmpty: Boolean = false   //does current batch has events?
+
     val kafkaStream = kafkaStreamConnect(ssc)
 
     val stream = kafkaStream.transform{ (rdd) =>
-
+      isBatchEmpty = rdd.isEmpty()
       queryConfigs.updateConfigs()
 
       rdd
     }
-
 
     val events = stream.map((tuple) => createEvent(tuple._2))
 
@@ -58,7 +63,12 @@ object SparkStatefulStreaming {
       sqlContext.sql(queryConfigs.getQuery(false)).show()
 
 
-      //TODO update previous config on filtering success at executors
+      if(failedQueryAccum.value == 0L && !isBatchEmpty){  //filtering success - query is not malformed and we can save current configs
+        queryConfigs.saveConfigAsLastSuccessful()
+      }
+
+      failedQueryAccum.setValue(0L) //resetting accumulator
+
     })
 
     ssc.start()
@@ -72,6 +82,7 @@ object SparkStatefulStreaming {
 
     KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, scala.collection.immutable.Set("events"))
   }
+
 
   def createEvent(strEvent: String): (String, MedicalConsultationWaitingPacientEvent) = {
 
@@ -87,12 +98,15 @@ object SparkStatefulStreaming {
     (event.patientID, event)
   }
 
+  /**
+    * Function to apply in updateStateByKey
+    *
+    * @param newValues - Seq of events arrived for each key in current batch
+    * @param state  - state mantained for each key over multiple batches
+    * @return - events that  will be passed as state in the next batch
+    */
   def updateFunction(newValues: Seq[MedicalConsultationWaitingPacientEvent], state: Option[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]) : Option[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]] =  {
     val updatedStateList = if (state.isEmpty) new java.util.ArrayList[MedicalConsultationWaitingPacientEvent]() else state.get
-
-    //val configs = queryConfigs
-    //println(configs)
-
 
     println(queryConfigs.getFilteringWhereClause(false))
 
@@ -124,21 +138,44 @@ object SparkStatefulStreaming {
 
       try {
         //filtering event objects within the 'prevStateEventsList'
-        val query = new Query()
-        //query.parse(s"SELECT * FROM com.xpandit.spark.MedicalConsultationWaitingPacientEvent WHERE ${dynamicConfig.get("filtering_where_clause").get}")
-        query.parse(s"SELECT * FROM com.xpandit.spark.MedicalConsultationWaitingPacientEvent WHERE age > 10")
 
-        val execute = query.execute(updatedStateList)
+        val queryStr = s"SELECT * FROM com.xpandit.spark.MedicalConsultationWaitingPacientEvent WHERE ${queryConfigs.getFilteringWhereClause(false)}"
+        val filteredEventsList = applySQLQueryOnJavaCollection(queryStr, updatedStateList).asInstanceOf[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]
 
-        return Some(execute.getResults.asInstanceOf[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]])
+        return Some(filteredEventsList)
       }
       catch{
-        case e : QueryParseException => logger.error("Malformed filtering WHERE specified in config.")
+        case e : QueryParseException =>
+          failedQueryAccum.add(1)
+
+          if(queryConfigs.hasSuccessfulConfig()) {  //current filtering query is malformed so we will use last successful configuration queries
+            val queryStr = s"SELECT * FROM com.xpandit.spark.MedicalConsultationWaitingPacientEvent WHERE ${queryConfigs.getFilteringWhereClause(true)}"
+            val filteredEventsList = applySQLQueryOnJavaCollection(queryStr, updatedStateList).asInstanceOf[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]
+
+            return Some(filteredEventsList)
+          }
+          else{ //current filtering query is malformed and there is no successful configuration saved. Exiting
+            throw new RuntimeException("Malformed filtering query specified.")
+          }
       }
     }
 
     //if returns here there are no events for this key in this batch or sql-filtering failed. We just pass the events to the next state
     Some(updatedStateList)
+  }
+
+
+  /**
+    * Applies SQL queries on Java collections using JoSQL library
+    *
+    * @param strQuery - query to apply ex. "SELECT * FROM com.package.Item  where price > 10.0"
+    * @param list - list of objects to filter
+    * @return - list of filtered objects
+    */
+  def applySQLQueryOnJavaCollection(strQuery: String, list: java.util.List[_]) : java.util.List[_] = {
+    val query = new Query()
+    query.parse(strQuery)
+    query.execute(list).getResults
   }
 }
 
