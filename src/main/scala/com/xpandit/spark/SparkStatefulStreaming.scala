@@ -2,6 +2,9 @@ package com.xpandit.spark
 
 import _root_.kafka.serializer.StringDecoder
 import com.xpandit.config.QueryConfigs
+import com.xpandit.data.EventData
+import com.xpandit.mutations.RowDataUtils
+import com.xpandit.utils.Constants
 import org.apache.log4j.Logger
 import org.apache.spark._
 import org.apache.spark.sql.SQLContext
@@ -9,8 +12,6 @@ import org.apache.spark.streaming._
 import org.apache.spark.streaming.dstream.InputDStream
 import org.apache.spark.streaming.kafka._
 import org.josql.{Query, QueryParseException}
-
-import scala.collection.JavaConversions._
 
 
 object SparkStatefulStreaming {
@@ -21,34 +22,36 @@ object SparkStatefulStreaming {
   val queryConfigs = new QueryConfigs()
   var failedQueryAccum : Accumulator[Long] = null
 
+  //TODO replace following hardcoded maps
+  val columnIndex: Map[String, Int] = Map.empty
+  val columnType: Map[String, String] = Map.empty
+
+
+
+
 
   def main(args: Array[String]): Unit = {
 
-    val conf = new SparkConf()
-      .setAppName("SparkStatefulStreaming")
-      .setMaster("local[4]")
-      .set("spark.driver.memory", "2g")
-      .set("spark.streaming.kafka.maxRatePerPartition", "50000")
-      .set("spark.streaming.backpressure.enabled", "true")
+    val ssc = setSparkStreamingContext()
 
-    val ssc = new StreamingContext(conf, Seconds(5))
-    ssc.checkpoint("/tmp/spark/checkpoint")
-
-    failedQueryAccum = ssc.sparkContext.accumulator(0L, "Failed filtering query")
+    failedQueryAccum = ssc.sparkContext.accumulator(0L, "Failed filtering query") //to find out whether or not filtering query has failed
 
     var isBatchEmpty: Boolean = false   //does current batch has events?
 
-    val kafkaStream = kafkaStreamConnect(ssc)
+    val kafkaStream = kafkaStreamConnect(ssc).map( (t) => createEventData(t._2) )
+
+
+
+
 
     val stream = kafkaStream.transform{ (rdd) =>
       isBatchEmpty = rdd.isEmpty()
       queryConfigs.updateConfigs()
-
       rdd
     }
 
-    val events = stream.map((tuple) => createEvent(tuple._2))
 
+    //TODO
     events.updateStateByKey(updateFunction).foreachRDD((rdd) => {
 
       val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
@@ -76,6 +79,20 @@ object SparkStatefulStreaming {
   }
 
 
+  def setSparkStreamingContext(): StreamingContext = {
+
+    val conf = new SparkConf()
+      .setAppName("SparkStatefulStreaming")
+      .setMaster("local[4]")
+      .set("spark.driver.memory", "2g")
+      .set("spark.streaming.kafka.maxRatePerPartition", "50000")
+      .set("spark.streaming.backpressure.enabled", "true")
+
+    val ssc = new StreamingContext(conf, Seconds(5))
+    ssc.checkpoint("/tmp/spark/checkpoint")
+    ssc
+  }
+
   def kafkaStreamConnect(ssc: StreamingContext) : InputDStream[(String, String)] = {
     val kafkaParams: Map[String, String] = Map("metadata.broker.list" -> "localhost:9092, localhost:9093, localhost:9094, localhost:9095",
       "auto.offset.reset" -> "smallest")
@@ -84,18 +101,14 @@ object SparkStatefulStreaming {
   }
 
 
-  def createEvent(strEvent: String): (String, MedicalConsultationWaitingPacientEvent) = {
+  def createEventData(strEvent: String): (String, (EventData) = {
 
-    val eventData = strEvent.split('|')
+    val rowData = RowDataUtils.processRowData(strEvent, attributes, PKsList, null, Constants.parserJSON, toLowerCase = true)
 
-    val healthServiceNumber = eventData(0).toLong
-    val name = eventData(1).toString
-    val age = eventData(2).toInt
-    val receptionUrgency = eventData(3).toInt
-    val requestTime = eventData(4).toLong
+    //TODO stopped here...
 
-    val event = new MedicalConsultationWaitingPacientEvent(healthServiceNumber, name, age, receptionUrgency, requestTime)
-    (event.patientID, event)
+    (rowData.getFormattedPKs, (rowData, rowData.getOperationPos)
+
   }
 
   /**
