@@ -3,15 +3,15 @@ package com.xpandit.spark
 import _root_.kafka.serializer.StringDecoder
 import com.xpandit.config.QueryConfigs
 import com.xpandit.data.EventData
-import com.xpandit.mutations.RowDataUtils
-import com.xpandit.utils.Constants
+import com.xpandit.mutations.{OperationType, RowData, RowDataInsert, RowDataUtils}
+import com.xpandit.utils.{Constants, SQLOnJavaCollections, TypeConverter}
 import org.apache.log4j.Logger
 import org.apache.spark._
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.dstream.InputDStream
 import org.apache.spark.streaming.kafka._
-import org.josql.{Query, QueryParseException}
+import org.josql.QueryParseException
 
 
 object SparkStatefulStreaming {
@@ -22,12 +22,31 @@ object SparkStatefulStreaming {
   val queryConfigs = new QueryConfigs()
   var failedQueryAccum : Accumulator[Long] = null
 
+
   //TODO replace following hardcoded maps
-  val columnIndex: Map[String, Int] = Map.empty
-  val columnType: Map[String, String] = Map.empty
+  val tableDescription = getTableDescription
+  val tablePrivateKeys = tableDescription._1
+  val tableColumnNamesArray = tableDescription._2
+  val tableColumnTypesArray = tableDescription._3
 
+  val columnIndex = {
+    var map : Map[String, Int] = Map.empty
 
+    for(i <- tableColumnNamesArray.indices){
+      map += tableColumnNamesArray(i) -> i
+    }
+    map
+  }
 
+  val columnScalaType = {
+    var map : Map[String, String] = Map.empty
+
+    for(i <- tableColumnTypesArray.indices){
+      map += tableColumnNamesArray(i) -> TypeConverter.hiveToScalaStrType(tableColumnTypesArray(i))
+    }
+    map
+  }
+  //UNTIL HERE
 
 
   def main(args: Array[String]): Unit = {
@@ -40,44 +59,59 @@ object SparkStatefulStreaming {
 
     val kafkaStream = kafkaStreamConnect(ssc).map( (t) => createEventData(t._2) )
 
-
-
-
-
     val stream = kafkaStream.transform{ (rdd) =>
       isBatchEmpty = rdd.isEmpty()
       queryConfigs.updateConfigs()
       rdd
     }
 
+    //holding only most recent event for each key, discarding the rest
+    val events = stream.reduceByKey( (e1, e2) => if(e1.rowData.getOperationPos > e2.rowData.getOperationPos) e1 else e2 )
 
-    //TODO
-    events.updateStateByKey(updateFunction).foreachRDD((rdd) => {
-
-      val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
-      import sqlContext.implicits._
-
-      val eventsRDD = rdd.flatMap { case (key, value) =>
-        value.toStream.map(event => new MedicalConsultationWaitingPacientEventCase(event.healthServiceNumber, event.name, event.age, event.receptionUrgency, event.requestTime))
-      }
-
-      eventsRDD.toDF().registerTempTable("waiting_patients")
-
-      sqlContext.sql(queryConfigs.getQuery(false)).show()
+    events.updateStateByKey(updateFunction).print()
 
 
-      if(failedQueryAccum.value == 0L && !isBatchEmpty){  //filtering success - query is not malformed and we can save current configs
-        queryConfigs.saveConfigAsLastSuccessful()
-      }
-
-      failedQueryAccum.setValue(0L) //resetting accumulator
-
-    })
+//    //TODO
+//    events.updateStateByKey(updateFunction).foreachRDD( (rdd) => {
+//
+//      val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
+//      import sqlContext.implicits._
+//
+//      val eventsRDD = rdd.flatMap { case (key, value) =>
+//        value.toStream.map(event => new MedicalConsultationWaitingPacientEventCase(event.healthServiceNumber, event.name, event.age, event.receptionUrgency, event.requestTime))
+//      }
+//
+//      eventsRDD.toDF().registerTempTable("waiting_patients")
+//
+//      sqlContext.sql(queryConfigs.getQuery(false)).show()
+//
+//      if(failedQueryAccum.value == 0L && !isBatchEmpty){  //filtering success - query is not malformed and we can save current configs
+//        queryConfigs.saveConfigAsLastSuccessful()
+//      }
+//
+//      failedQueryAccum.setValue(0L) //resetting accumulator
+//
+//    })
 
     ssc.start()
     ssc.awaitTermination()
   }
 
+
+  /**
+    * Get table description from source ex. Hive
+    *
+    * @return (privateKeyArray, attributes, types)
+    */
+  def getTableDescription : (Array[String], Array[String], Array[String]) = {
+    //TODO replace hardcoded
+
+    val tablePrivateKeys = Array("HEALTHSERVICENUMBER", "NAME")
+    val tableAttributeNames = Array("HEALTHSERVICENUMBER", "NAME", "AGE", "RECEPTIONURGENCY", "REQUESTTIME")
+    val tableAttributeTypes = Array("BIGINT", "STRING", "INT", "INT", "BIGINT")
+
+    (tablePrivateKeys, tableAttributeNames, tableAttributeTypes)
+  }
 
   def setSparkStreamingContext(): StreamingContext = {
 
@@ -100,15 +134,20 @@ object SparkStatefulStreaming {
     KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, scala.collection.immutable.Set("events"))
   }
 
+  def createEventData(strEvent: String): (String, (EventData)) = {
 
-  def createEventData(strEvent: String): (String, (EventData) = {
+    //val rowData = RowDataUtils.processRowData(strEvent, columnNamesArray, columnPrivateKeys , null, Constants.parserJSON, toLowerCase = true)
+    val rowData = createRowData(strEvent)
 
-    val rowData = RowDataUtils.processRowData(strEvent, attributes, PKsList, null, Constants.parserJSON, toLowerCase = true)
+    val eventData = new EventData(columnIndex, columnScalaType, rowData)
 
-    //TODO stopped here...
+    (eventData.getPrivateKeysValues, eventData)
+  }
 
-    (rowData.getFormattedPKs, (rowData, rowData.getOperationPos)
-
+  //TEMPORARY function
+  def createRowData(strEvent: String) : RowData = {
+    val eventFields = strEvent.split('|')
+    new RowDataInsert(eventFields, tablePrivateKeys, eventFields(eventFields.length - 1).toLong)
   }
 
   /**
@@ -118,56 +157,36 @@ object SparkStatefulStreaming {
     * @param state  - state mantained for each key over multiple batches
     * @return - events that  will be passed as state in the next batch
     */
-  def updateFunction(newValues: Seq[MedicalConsultationWaitingPacientEvent], state: Option[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]) : Option[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]] =  {
-    val updatedStateList = if (state.isEmpty) new java.util.ArrayList[MedicalConsultationWaitingPacientEvent]() else state.get
+  def updateFunction(newValues: Seq[EventData], state: Option[java.util.ArrayList[EventData]]) : Option[java.util.ArrayList[EventData]] =  {
+    val updatedStateList = if (state.isEmpty) new java.util.ArrayList[EventData]() else state.get
 
-    println(queryConfigs.getFilteringWhereClause(false))
+    if(newValues.nonEmpty) {  //if there is any event in current batch
 
-    if(newValues.nonEmpty) {    //if there is any event in current batch
+      if (newValues.head.rowData.getOperationType == OperationType.DELETE.toString) return None //Delete operation, nothing will be passed to the next state to this key
 
-      var maxTimestamp = 0L
-      var mostRecentEvent : MedicalConsultationWaitingPacientEvent = null
+      updatedStateList.clear() //replacing event received in current batch with previous passed state event [INSERT or UPDATE] operation
+      updatedStateList.add(newValues.head)
+    }
 
-      newValues.foreach { e => //find more recent event (biggest timestamp)
-
-        if (mostRecentEvent == null) {
-          maxTimestamp = e.requestTime
-          mostRecentEvent = e
-        }
-        else if (e.requestTime >= maxTimestamp) {
-          maxTimestamp = e.requestTime
-          mostRecentEvent = e
-        }
-      }
-
-      if (!updatedStateList.isEmpty && updatedStateList.get(0).requestTime <= mostRecentEvent.requestTime) {
-        //replace if most recent arrived event is more recent than current held one
-        updatedStateList.add(mostRecentEvent)
-        updatedStateList.remove(0)
-      }
-      else {
-        updatedStateList.add(mostRecentEvent)
-      }
+    if(!updatedStateList.isEmpty) { //apply filter on event
 
       try {
-        //filtering event objects within the 'prevStateEventsList'
-
-        val queryStr = s"SELECT * FROM com.xpandit.spark.MedicalConsultationWaitingPacientEvent WHERE ${queryConfigs.getFilteringWhereClause(false)}"
-        val filteredEventsList = applySQLQueryOnJavaCollection(queryStr, updatedStateList).asInstanceOf[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]
-
+        //filtering event objects within the 'updatedStateList'
+        val filteredEventsList = performEventDataSQLFiltering(updatedStateList, updatedStateList.get(0), lastSuccessfulConfiguration = false)
         return Some(filteredEventsList)
       }
-      catch{
-        case e : QueryParseException =>
+      catch {
+        case e: QueryParseException =>
           failedQueryAccum.add(1)
 
-          if(queryConfigs.hasSuccessfulConfig()) {  //current filtering query is malformed so we will use last successful configuration queries
-            val queryStr = s"SELECT * FROM com.xpandit.spark.MedicalConsultationWaitingPacientEvent WHERE ${queryConfigs.getFilteringWhereClause(true)}"
-            val filteredEventsList = applySQLQueryOnJavaCollection(queryStr, updatedStateList).asInstanceOf[java.util.ArrayList[MedicalConsultationWaitingPacientEvent]]
+          if (queryConfigs.hasSuccessfulConfig) {
+            //current filtering query is malformed so we will use last successful configuration queries
 
+            val filteredEventsList = performEventDataSQLFiltering(updatedStateList, updatedStateList.get(0), lastSuccessfulConfiguration = true)
             return Some(filteredEventsList)
           }
-          else{ //current filtering query is malformed and there is no successful configuration saved. Exiting
+          else {
+            //current filtering query is malformed and there is no successful configuration saved. Exiting
             throw new RuntimeException("Malformed filtering query specified.")
           }
       }
@@ -179,18 +198,16 @@ object SparkStatefulStreaming {
 
 
   /**
-    * Applies SQL queries on Java collections using JoSQL library
+    * Performs filtering on given objects with previously user defined sql where clause
     *
-    * @param strQuery - query to apply ex. "SELECT * FROM com.package.Item  where price > 10.0"
-    * @param list - list of objects to filter
+    * @param objList - list of objects to filter
+    * @param eventData - EventData that represents each e event object
+    * @param lastSuccessfulConfiguration - use last successfully applied user defined query
     * @return - list of filtered objects
     */
-  def applySQLQueryOnJavaCollection(strQuery: String, list: java.util.List[_]) : java.util.List[_] = {
-    val query = new Query()
-    query.parse(strQuery)
-    query.execute(list).getResults
+  def performEventDataSQLFiltering(objList: java.util.ArrayList[EventData], eventData: EventData, lastSuccessfulConfiguration: Boolean): java.util.ArrayList[EventData] = {
+    val replacedWhereClause = SQLOnJavaCollections.buildWhereClause(queryConfigs.getFilteringWhereClause(false), eventData)
+    var query = SQLOnJavaCollections.buildQuery("com.xpandit.data.EventData", replacedWhereClause)
+    SQLOnJavaCollections.apply(query, objList).asInstanceOf[java.util.ArrayList[EventData]]
   }
 }
-
-//case class just defined to 'Inferring the Schema Using Reflection'
-case class MedicalConsultationWaitingPacientEventCase(healthServiceNumber: Long, name: String, age: Int, receptionUrgency: Int, requestTime: Long)

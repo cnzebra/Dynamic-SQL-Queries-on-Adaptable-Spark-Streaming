@@ -12,7 +12,7 @@ class QueryConfigs extends Serializable {
   var lastSuccessfulConfig: Properties = null
   var config : Properties = null
 
-  def hasSuccessfulConfig() = lastSuccessfulConfig != null
+  def hasSuccessfulConfig = lastSuccessfulConfig != null
 
   def getFilteringWhereClause(lastSuccConfig: Boolean): String = (if (lastSuccConfig) lastSuccessfulConfig else config).getProperty("filtering_where_clause")
 
