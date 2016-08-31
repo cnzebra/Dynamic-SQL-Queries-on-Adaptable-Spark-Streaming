@@ -7,11 +7,13 @@ import com.xpandit.mutations.{OperationType, RowData, RowDataInsert, RowDataUtil
 import com.xpandit.utils.{Constants, SQLOnJavaCollections, TypeConverter}
 import org.apache.log4j.Logger
 import org.apache.spark._
-import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.dstream.InputDStream
 import org.apache.spark.streaming.kafka._
 import org.josql.QueryParseException
+
+import scala.collection.JavaConversions._
 
 
 object SparkStatefulStreaming {
@@ -42,7 +44,7 @@ object SparkStatefulStreaming {
     var map : Map[String, String] = Map.empty
 
     for(i <- tableColumnTypesArray.indices){
-      map += tableColumnNamesArray(i) -> TypeConverter.hiveToScalaStrType(tableColumnTypesArray(i))
+      map += tableColumnNamesArray(i) -> TypeConverter.hiveToScalaStringType(tableColumnTypesArray(i))
     }
     map
   }
@@ -68,30 +70,37 @@ object SparkStatefulStreaming {
     //holding only most recent event for each key, discarding the rest
     val events = stream.reduceByKey( (e1, e2) => if(e1.rowData.getOperationPos > e2.rowData.getOperationPos) e1 else e2 )
 
-    events.updateStateByKey(updateFunction).print()
+    events.updateStateByKey(updateFunction).foreachRDD( (rdd) => {
+
+      val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
+
+      val eventsRDD = rdd.flatMap { case (key, value) =>
+        value.toStream.map{ (event) =>
+          val columnValues = event.rowData.data
+
+          val objValues = columnValues.zipWithIndex.map{ case (valueStr, index) => TypeConverter.castStrValueToObject(valueStr, tableColumnTypesArray(index))}
+          Row.fromSeq(objValues)
+        }
+      }
+
+      val schema = TypeConverter.generateStructType(tableColumnNamesArray, columnScalaType)
+
+      val dataFrame = sqlContext.createDataFrame(eventsRDD, schema)
+
+      //dataFrame.printSchema()
+
+      dataFrame.registerTempTable("events")
+
+      sqlContext.sql(queryConfigs.getQuery(false)).show()
 
 
-//    //TODO
-//    events.updateStateByKey(updateFunction).foreachRDD( (rdd) => {
-//
-//      val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
-//      import sqlContext.implicits._
-//
-//      val eventsRDD = rdd.flatMap { case (key, value) =>
-//        value.toStream.map(event => new MedicalConsultationWaitingPacientEventCase(event.healthServiceNumber, event.name, event.age, event.receptionUrgency, event.requestTime))
-//      }
-//
-//      eventsRDD.toDF().registerTempTable("waiting_patients")
-//
-//      sqlContext.sql(queryConfigs.getQuery(false)).show()
-//
-//      if(failedQueryAccum.value == 0L && !isBatchEmpty){  //filtering success - query is not malformed and we can save current configs
-//        queryConfigs.saveConfigAsLastSuccessful()
-//      }
-//
-//      failedQueryAccum.setValue(0L) //resetting accumulator
-//
-//    })
+      if(failedQueryAccum.value == 0L && !isBatchEmpty){  //filtering success - query is not malformed and we can save current configs
+        queryConfigs.saveConfigAsLastSuccessful()
+      }
+
+      failedQueryAccum.setValue(0L) //resetting accumulator
+
+    })
 
     ssc.start()
     ssc.awaitTermination()
@@ -99,7 +108,7 @@ object SparkStatefulStreaming {
 
 
   /**
-    * Get table description from source ex. Hive
+    * Get table description from source table ex. Hive
     *
     * @return (privateKeyArray, attributes, types)
     */
@@ -134,6 +143,13 @@ object SparkStatefulStreaming {
     KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, scala.collection.immutable.Set("events"))
   }
 
+
+  /**
+    * Parses each event(string) and creates object holding event info
+    *
+    * @param strEvent
+    * @return
+    */
   def createEventData(strEvent: String): (String, (EventData)) = {
 
     //val rowData = RowDataUtils.processRowData(strEvent, columnNamesArray, columnPrivateKeys , null, Constants.parserJSON, toLowerCase = true)
@@ -144,7 +160,6 @@ object SparkStatefulStreaming {
     (eventData.getPrivateKeysValues, eventData)
   }
 
-  //TEMPORARY function
   def createRowData(strEvent: String) : RowData = {
     val eventFields = strEvent.split('|')
     new RowDataInsert(eventFields, tablePrivateKeys, eventFields(eventFields.length - 1).toLong)

@@ -25,12 +25,14 @@ object SQLOnJavaCollections{
   }
 
 
-  def buildQuery(objClassPath: String, whereClause: String) : String  = {
-
-
-
-    "SELECT * FROM " + objClassPath + " WHERE " + whereClause
-  }
+  /**
+    * Builds query that  will be applied
+    *
+    * @param objClassPath - classpath to the object being filtered
+    * @param whereClause - query's where clause to apply
+    * @return  - string final query
+    */
+  def buildQuery(objClassPath: String, whereClause: String) : String  = "SELECT * FROM " + objClassPath + " WHERE " + whereClause
 
 
   /**
@@ -61,16 +63,21 @@ object SQLOnJavaCollections{
   }
 }
 
-
+/**
+  * User defined functions that can be used in sql query to apply
+  * Requirement: query.addFunctionHandler(new FunctionHandlers())
+  */
 class FunctionHandlers{
 
-  def getAsInt(column: String, eventData: EventData): Int = {
-    eventData.getAsInt(column)
-  }
+  def getAsSTRING(column: String, eventData: EventData): String = eventData.getAsString(column)
+  def getAsBOOLEAN(column: String, eventData: EventData): Boolean = eventData.getAsBoolean(column)
+  def getAsBYTE(column: String, eventData: EventData): Byte = eventData.getAsByte(column)
+  def getAsSHORT(column: String, eventData: EventData): Short = eventData.getAsShort(column)
+  def getAsINT(column: String, eventData: EventData): Int = eventData.getAsInt(column)
+  def getAsLONG(column: String, eventData: EventData): Long = eventData.getAsLong(column)
+  def getAsFLOAT(column: String, eventData: EventData): Float = eventData.getAsFloat(column)
+  def getAsDOUBLE(column: String, eventData: EventData): Double = eventData.getAsDouble(column)
+  def getAsBIGDECIMAL(column: String, eventData: EventData): java.math.BigDecimal = eventData.getAsBigDecimal(column)
 
-  def getAsString(column: String, eventData: EventData): String = {
-    eventData.getAsString(column)
-  }
-
-  //TODO complete to other available types
+  //TODO complete with other available types
 }
