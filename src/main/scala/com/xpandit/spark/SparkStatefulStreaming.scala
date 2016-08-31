@@ -6,7 +6,7 @@ import _root_.kafka.serializer.StringDecoder
 import com.xpandit.config.QueryConfigs
 import com.xpandit.data.EventData
 import com.xpandit.mutations.{OperationType, RowData, RowDataInsert, RowDataUtils}
-import com.xpandit.utils.{Constants, SQLOnJavaCollections, TypeConverter}
+import com.xpandit.utils.{SQLOnJavaCollections, TypeConverter}
 import org.apache.log4j.Logger
 import org.apache.spark._
 import org.apache.spark.sql.{Row, SQLContext}
@@ -26,8 +26,6 @@ object SparkStatefulStreaming {
   val queryConfigs = new QueryConfigs()
   var failedQueryAccum : Accumulator[Long] = null
 
-
-  //TODO replace following hardcoded maps
   val tableDescription = getTableDescription
   val tablePrivateKeys = tableDescription._1
   val tableColumnNamesArray = tableDescription._2
@@ -41,7 +39,6 @@ object SparkStatefulStreaming {
     }
     map
   }
-
   val columnScalaType = {
     var map : Map[String, String] = Map.empty
 
@@ -50,7 +47,6 @@ object SparkStatefulStreaming {
     }
     map
   }
-  //UNTIL HERE
 
 
   def main(args: Array[String]): Unit = {
@@ -96,9 +92,16 @@ object SparkStatefulStreaming {
       //executing each user defined query
       queryConfigs.getQueries(false).foreach{ case (index, query) =>
         println(s"[${new Timestamp(time.milliseconds)}] [$index] $query")
-        val dfResult = sqlContext.sql(query)
-        dfResult.write.parquet(s"src/main/resources/output/${index}_$time")
-        dfResult.show()
+
+        try{
+          val dfResult = sqlContext.sql(query)
+          dfResult.write.parquet(s"src/main/resources/output/${index}_$time")
+          dfResult.show()
+        }
+          catch{
+            case _ => logger.error(s"[SQL Execution Failed] Check your query: [$index] $query")
+          }
+
 
         //TODO save output somewhere else according to business case
       }
