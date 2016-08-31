@@ -1,5 +1,7 @@
 package com.xpandit.spark
 
+import java.sql.Timestamp
+
 import _root_.kafka.serializer.StringDecoder
 import com.xpandit.config.QueryConfigs
 import com.xpandit.data.EventData
@@ -56,7 +58,6 @@ object SparkStatefulStreaming {
     val ssc = setSparkStreamingContext()
 
     failedQueryAccum = ssc.sparkContext.accumulator(0L, "Failed filtering query") //to find out whether or not filtering query has failed
-
     var isBatchEmpty: Boolean = false   //does current batch has events?
 
     val kafkaStream = kafkaStreamConnect(ssc).map( (t) => createEventData(t._2) )
@@ -70,7 +71,7 @@ object SparkStatefulStreaming {
     //holding only most recent event for each key, discarding the rest
     val events = stream.reduceByKey( (e1, e2) => if(e1.rowData.getOperationPos > e2.rowData.getOperationPos) e1 else e2 )
 
-    events.updateStateByKey(updateFunction).foreachRDD( (rdd) => {
+    events.updateStateByKey(updateFunction).foreachRDD( (rdd, time) => {
 
       val sqlContext = SQLContext.getOrCreate(rdd.sparkContext)
 
@@ -91,8 +92,18 @@ object SparkStatefulStreaming {
 
       dataFrame.registerTempTable("events")
 
-      sqlContext.sql(queryConfigs.getQuery(false)).show()
 
+      //executing each user defined query
+      queryConfigs.getQueries(false).foreach{ case (index, query) =>
+        println(s"[${new Timestamp(time.milliseconds)}] [$index] $query")
+        val dfResult = sqlContext.sql(query)
+        dfResult.write.parquet(s"src/main/resources/output/${index}_$time")
+        dfResult.show()
+
+        //TODO save output somewhere else according to business case
+      }
+
+      println("-------------------------------------------------------------------------------------------------------------------------------------------------------")
 
       if(failedQueryAccum.value == 0L && !isBatchEmpty){  //filtering success - query is not malformed and we can save current configs
         queryConfigs.saveConfigAsLastSuccessful()
@@ -131,7 +142,7 @@ object SparkStatefulStreaming {
       .set("spark.streaming.kafka.maxRatePerPartition", "50000")
       .set("spark.streaming.backpressure.enabled", "true")
 
-    val ssc = new StreamingContext(conf, Seconds(5))
+    val ssc = new StreamingContext(conf, Seconds(10))
     ssc.checkpoint("/tmp/spark/checkpoint")
     ssc
   }
@@ -152,6 +163,7 @@ object SparkStatefulStreaming {
     */
   def createEventData(strEvent: String): (String, (EventData)) = {
 
+    //TODO user parser to create rowData
     //val rowData = RowDataUtils.processRowData(strEvent, columnNamesArray, columnPrivateKeys , null, Constants.parserJSON, toLowerCase = true)
     val rowData = createRowData(strEvent)
 
