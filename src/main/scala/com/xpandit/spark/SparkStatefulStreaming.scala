@@ -5,7 +5,7 @@ import java.sql.Timestamp
 import _root_.kafka.serializer.StringDecoder
 import com.xpandit.config.QueryConfigs
 import com.xpandit.data.EventData
-import com.xpandit.mutations.{OperationType, RowData, RowDataInsert, RowDataUtils}
+import com.xpandit.mutations._
 import com.xpandit.utils.{SQLOnJavaCollections, TypeConverter}
 import org.apache.log4j.Logger
 import org.apache.spark._
@@ -129,7 +129,7 @@ object SparkStatefulStreaming {
   def getTableDescription : (Array[String], Array[String], Array[String]) = {
     //TODO replace hardcoded
 
-    val tablePrivateKeys = Array("HEALTHSERVICENUMBER", "NAME")
+    val tablePrivateKeys = Array("HEALTHSERVICENUMBER")
     val tableAttributeNames = Array("HEALTHSERVICENUMBER", "NAME", "AGE", "RECEPTIONURGENCY", "REQUESTTIME")
     val tableAttributeTypes = Array("BIGINT", "STRING", "INT", "INT", "BIGINT")
 
@@ -176,8 +176,15 @@ object SparkStatefulStreaming {
   }
 
   def createRowData(strEvent: String) : RowData = {
-    val eventFields = strEvent.split('|')
-    new RowDataInsert(eventFields, tablePrivateKeys, eventFields(eventFields.length - 1).toLong)
+    val split = strEvent.split('|')
+    val opType = split(0)
+    val eventFields = split.drop(1)
+
+    opType match {
+      case "I" => new RowDataInsert(eventFields, tablePrivateKeys, eventFields(eventFields.length - 1).toLong)
+      case "U" => new RowDataUpdate(eventFields, tablePrivateKeys, eventFields(eventFields.length - 1).toLong)
+      case "D" => new RowDataDelete(eventFields, tablePrivateKeys, eventFields(eventFields.length - 1).toLong)
+    }
   }
 
   /**
